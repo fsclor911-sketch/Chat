@@ -1,19 +1,11 @@
 const express = require('express');
-const http = require('http');
-const WebSocket = require('ws');
 const cors = require('cors');
 
 const app = express();
 app.use(cors());
 app.use(express.json());
 
-const server = http.createServer(app);
-const wss = new WebSocket.Server({ server });
-
-// تخزين اتصالات العملاء
-const clients = new Set();
-
-// منع السبام (3 رسائل كل 5 ثوانٍ لكل لاعب)
+// منع السبام (3 رسائل كل 5 ثوانٍ)
 const spamTracker = new Map();
 const SPAM_LIMIT = 3;
 const SPAM_WINDOW_MS = 5000;
@@ -34,54 +26,48 @@ function isSpamming(playerName) {
     return data.count > SPAM_LIMIT;
 }
 
-// WebSocket: استقبال الرسائل من العملاء وإعادة بثها للجميع
-wss.on('connection', (ws) => {
-    clients.add(ws);
-    console.log(`Client connected (${clients.size} total)`);
+// تخزين قائمة انتظار الرسائل لكل عميل (لمحاكاة الإرسال الفوري)
+// سنستخدم Map حيث المفتاح هو معرف العميل (مؤقت)، ولكن بما أن HTTP عديم الحالة،
+// سنستخدم آلية بسيطة: عندما يرسل لاعب رسالة، نخزنها في مصفوفة مؤقتة لجميع العملاء الذين يطلبونها خلال ثانيتين.
+// هذه مصفوفة "لحظية" تُفرغ بعد ثانيتين.
+let recentMessages = [];
+let lastClear = Date.now();
 
-    ws.on('message', (message) => {
-        try {
-            const data = JSON.parse(message);
-            const { playerName, msg, timestamp } = data;
-            
-            if (!playerName || !msg) return;
+// مسح الرسائل القديمة كل ثانيتين
+setInterval(() => {
+    recentMessages = [];
+    lastClear = Date.now();
+}, 2000);
 
-            // منع السبام
-            if (isSpamming(playerName)) {
-                ws.send(JSON.stringify({ error: 'Spam detected' }));
-                return;
-            }
+app.post('/send', (req, res) => {
+    const { playerName, message, timestamp } = req.body;
+    if (!playerName || !message) {
+        return res.status(400).json({ error: 'Missing data' });
+    }
 
-            console.log(`[${new Date().toISOString()}] ${playerName}: ${msg}`);
+    if (isSpamming(playerName)) {
+        return res.status(429).json({ error: 'Spam detected' });
+    }
 
-            // بث الرسالة لجميع العملاء المتصلين (بما فيهم المرسل)
-            const broadcastMsg = JSON.stringify({
-                playerName,
-                message: msg,
-                timestamp: timestamp || Date.now()
-            });
-            clients.forEach(client => {
-                if (client.readyState === WebSocket.OPEN) {
-                    client.send(broadcastMsg);
-                }
-            });
-        } catch (e) {
-            console.error('Invalid message:', e);
-        }
-    });
+    const newMsg = {
+        playerName,
+        message,
+        timestamp: timestamp || Date.now()
+    };
+    // إضافة الرسالة إلى المصفوفة المؤقتة
+    recentMessages.push(newMsg);
 
-    ws.on('close', () => {
-        clients.delete(ws);
-        console.log(`Client disconnected (${clients.size} remaining)`);
-    });
+    console.log(`[${new Date().toISOString()}] ${playerName}: ${message}`);
+    res.json({ success: true });
 });
 
-// نقطة HTTP للتحقق من صحة الخادم (اختياري)
-app.get('/status', (req, res) => {
-    res.json({ status: 'ok', clients: clients.size });
+app.get('/messages', (req, res) => {
+    // إرجاع الرسائل التي حدثت خلال آخر ثانيتين فقط
+    // (يعني اللاعبون المتصلون الآن سيرون الرسائل التي أرسلت أثناء تواجدهم)
+    res.json(recentMessages);
 });
 
 const PORT = process.env.PORT || 3000;
-server.listen(PORT, () => {
-    console.log(`Chat server running on port ${PORT} (WebSocket ready)`);
+app.listen(PORT, () => {
+    console.log(`Chat server running on port ${PORT} (no message history)`);
 });
