@@ -1,15 +1,19 @@
 const express = require('express');
+const http = require('http');
+const WebSocket = require('ws');
 const cors = require('cors');
 
 const app = express();
 app.use(cors());
 app.use(express.json());
 
-// تخزين آخر 50 رسالة
-let messages = [];
-const MAX_MESSAGES = 50;
+const server = http.createServer(app);
+const wss = new WebSocket.Server({ server });
 
-// منع السبام (3 رسائل كل 5 ثوانٍ)
+// تخزين اتصالات العملاء
+const clients = new Set();
+
+// منع السبام (3 رسائل كل 5 ثوانٍ لكل لاعب)
 const spamTracker = new Map();
 const SPAM_LIMIT = 3;
 const SPAM_WINDOW_MS = 5000;
@@ -30,33 +34,54 @@ function isSpamming(playerName) {
     return data.count > SPAM_LIMIT;
 }
 
-app.post('/send', (req, res) => {
-    const { playerName, message, timestamp } = req.body;
-    if (!playerName || !message) {
-        return res.status(400).json({ error: 'Missing data' });
-    }
+// WebSocket: استقبال الرسائل من العملاء وإعادة بثها للجميع
+wss.on('connection', (ws) => {
+    clients.add(ws);
+    console.log(`Client connected (${clients.size} total)`);
 
-    if (isSpamming(playerName)) {
-        return res.status(429).json({ error: 'Spam detected' });
-    }
+    ws.on('message', (message) => {
+        try {
+            const data = JSON.parse(message);
+            const { playerName, msg, timestamp } = data;
+            
+            if (!playerName || !msg) return;
 
-    const newMsg = {
-        playerName,
-        message,
-        timestamp: timestamp || Date.now()
-    };
-    messages.push(newMsg);
-    if (messages.length > MAX_MESSAGES) messages.shift();
+            // منع السبام
+            if (isSpamming(playerName)) {
+                ws.send(JSON.stringify({ error: 'Spam detected' }));
+                return;
+            }
 
-    console.log(`[${new Date().toISOString()}] ${playerName}: ${message}`);
-    res.json({ success: true });
+            console.log(`[${new Date().toISOString()}] ${playerName}: ${msg}`);
+
+            // بث الرسالة لجميع العملاء المتصلين (بما فيهم المرسل)
+            const broadcastMsg = JSON.stringify({
+                playerName,
+                message: msg,
+                timestamp: timestamp || Date.now()
+            });
+            clients.forEach(client => {
+                if (client.readyState === WebSocket.OPEN) {
+                    client.send(broadcastMsg);
+                }
+            });
+        } catch (e) {
+            console.error('Invalid message:', e);
+        }
+    });
+
+    ws.on('close', () => {
+        clients.delete(ws);
+        console.log(`Client disconnected (${clients.size} remaining)`);
+    });
 });
 
-app.get('/messages', (req, res) => {
-    res.json(messages);
+// نقطة HTTP للتحقق من صحة الخادم (اختياري)
+app.get('/status', (req, res) => {
+    res.json({ status: 'ok', clients: clients.size });
 });
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
-    console.log(`Chat server running on port ${PORT}`);
+server.listen(PORT, () => {
+    console.log(`Chat server running on port ${PORT} (WebSocket ready)`);
 });
